@@ -1,0 +1,693 @@
+Pasted text(6).txt
+Document
+can you share quation and asnswer for same 
+Pasted text(7).txt
+Document
+Could you please read the accompanying material, consider it, and extract the question and answer? If so, please share the table format question, answer, and explanation.
+Wed, Aug 19 at 4:41 PM
+in afd
+
+Perfect. Let's continue with the mock interview, one question at a time, using the topics from your interview material.
+
+Mock Interview — Question 2
+Interviewer:
+
+Your ADF Copy Activity is copying 1 crore records from SQL Server to ADLS/Lakehouse. The activity completes around 70% and then fails. The business wants the pipeline to recover without creating duplicate records. How would you handle this situation?
+
+Best 5-year answer
+
+"First, I would check the ADF monitoring details and identify the actual failure—whether it is a source connectivity issue, network failure, sink issue, authentication problem, schema mismatch, throttling or timeout.
+
+I would then check whether partial data has already been written to the destination. I would not simply rerun the pipeline blindly because that could create duplicate records.
+
+I would design the pipeline to be restartable and idempotent. Depending on the target design, I could use staging, batch-level tracking, partition-level processing, overwrite, MERGE/upsert or deduplication.
+
+For an incremental pipeline, I would also make sure the watermark is updated only after the complete batch succeeds. If the Copy Activity fails, the previous successful watermark remains unchanged, allowing the failed batch to be safely reprocessed.
+
+I would configure retry for transient failures, but I would not rely only on retries for permanent errors.
+
+After recovery, I would validate source-to-target counts, business keys and duplicate records before marking the pipeline successful."
+
+Architecture
+SQL Server
+    |
+    v
+Copy Activity
+    |
+    v
+Staging / Target
+    |
+    v
+Validation
+    |
+  SUCCESS?
+   /    \
+ Yes    No
+  |      |
+Merge   Retry
+  |      |
+Target  Alert
+Interviewer follow-up 1
+
+What if 70% of the data is already present in the destination?
+
+Answer:
+
+"I would first determine whether the destination load is append, overwrite or upsert based on the design. I would identify the successfully processed records using a batch ID, partition or business key. Then I would process only the remaining data or safely replace the incomplete batch rather than blindly appending the entire dataset."
+
+Interviewer follow-up 2
+
+What if your watermark was already updated before the failure?
+
+Best answer:
+
+"That is a design issue I would correct. The watermark should represent the last successfully committed batch, not merely the last batch attempted. If the watermark has already advanced, I would recover using the batch/control information or reset it to the last confirmed successful value. The important principle is that a failed batch must not cause records to be skipped."
+
+Interviewer follow-up 3
+
+Would you increase retry count to 10?
+
+Answer:
+
+"Not automatically. I would first determine whether the failure is transient. Retry is useful for temporary network or service issues, but if the root cause is a schema mismatch or invalid query, repeated retries only waste time. I would use an appropriate retry policy based on the failure type."
+
+Mock Interview — Question 3
+Interviewer:
+
+You have 50 SQL Server tables. 40 need incremental loading, and 10 need full loading every day. Tomorrow the business says one of the full-load tables should now become incremental. Would you modify the ADF pipeline? Explain your design.
+
+What I expect from a 5-year candidate
+
+Your answer should mention:
+
+Metadata-driven framework → Control table → LoadType → Lookup → ForEach → If Condition → Parameters → Watermark → Reusability
+
+Try answering this yourself first.
+
+Then compare your answer against the model answer above after you formulate it.
+
+yes
+
+Good. Now let's continue the ADF mock interview at your 5-year level.
+
+Mock Interview — Question 4
+Interviewer:
+
+You have 50 tables in SQL Server.
+40 tables require incremental loading and 10 require full loading every day.
+
+Tomorrow, the business says that one of the full-load tables must now be changed to incremental loading.
+
+Would you modify the ADF pipeline? How would you design it?
+
+Best answer
+
+"I would avoid modifying the pipeline itself. I would use a metadata-driven design, where the load behavior is controlled through a metadata or control table.
+
+For example, the control table would contain TableName, LoadType, WatermarkColumn, LastWatermark, TargetPath and IsActive.
+
+Currently, the table might have:
+
+Product | FULL | NULL | NULL
+
+If the business changes it to incremental, I would update the metadata:
+
+Product | INCREMENTAL | ModifiedDate | <last successful watermark>
+
+The same ADF pipeline would pick up the new configuration through Lookup and ForEach and route the table through the incremental-load logic.
+
+This means I don't have to modify or redeploy the pipeline just because the load strategy of one table changed."
+
+Example
+
+Before:
+
+Control Table
+------------------------------------------------
+TableName   LoadType       WatermarkColumn
+Product     FULL           NULL
+
+After:
+
+Control Table
+------------------------------------------------
+TableName   LoadType       WatermarkColumn
+Product     INCREMENTAL    ModifiedDate
+
+Pipeline:
+
+                Lookup
+                   ↓
+              Control Table
+                   ↓
+                ForEach
+                   ↓
+              LoadType?
+              /       \
+           FULL     INCREMENTAL
+            ↓            ↓
+        Full Load    Watermark
+                         ↓
+                   Incremental Query
+Strong closing statement
+
+"The advantage of a metadata-driven architecture is that business-rule changes such as Full → Incremental can usually be handled through configuration rather than code or pipeline redesign."
+
+Follow-up Question 1
+Interviewer:
+
+Where would you store the last successful watermark?
+
+Answer
+
+"I would store it in the control table, along with the table name and watermark column. For example, Customer | ModifiedDate | 2026-08-20 10:00:00. I would update that value only after the corresponding data load completes successfully."
+
+Follow-up Question 2
+Interviewer:
+
+What if the table doesn't have a ModifiedDate column?
+
+Answer
+
+"I would first check whether another reliable incremental mechanism is available, such as an increasing ID, CDC, Change Tracking or another source-system audit column. If the source doesn't provide any reliable change-detection mechanism, I would use a full load or another agreed reconciliation strategy rather than implementing an unsafe incremental process."
+
+Follow-up Question 3
+Interviewer:
+
+How would you process all 50 tables efficiently?
+
+Answer
+
+"I would use a ForEach with controlled parallelism rather than processing all 50 tables simultaneously. The degree of concurrency should be based on source database capacity, Integration Runtime capacity, network throughput and destination capacity."
+
+Mock Interview — Question 5
+Interviewer:
+
+You have an incremental ADF pipeline using ModifiedDate as the watermark. Today's pipeline starts at 10:00 AM. At 10:05 AM, a new record is inserted into SQL Server with a ModifiedDate of 10:04 AM. The pipeline had already determined its upper boundary earlier. How will you make sure this record is not missed?
+
+This is a more difficult watermark scenario.
+
+Think about:
+
+lower watermark + upper watermark + overlapping windows + duplicate handling + when to commit the watermark.
+
+Fri, Aug 21 at 3:59 PM
+can share me answer for same i have 5 year of experience in data engg StarSchema SQL means function, SP in SQL (Scalar function) Diff SP vs Functions Limit vs TOP Primary Key vs Unique Key delete, drop, truncate
+
+RDD vs DataFrame, why Dataframe ?
+
+Transformation (which activity), Action? Copy Activity?
+
+Triggers, Event, Tumbling window? Linked Service?
+
+In powerbi(Gold layer), if some records missiong out of 100. how will you check and identify those ?
+
+3rd highest salary: select salary from (select salary, dense_rank() over (order by salary desc) as rank1 from emp) as high_sal where rank1=3;
+
+Absolutely. Based on the interview material you shared, these are the kinds of questions that appear repeatedly in the source material, including TCS and other interviews.
+
+For your 5 years of Data Engineering experience, I would answer them with definition + practical use + example + production consideration, not just one-line definitions.
+
+1. What is a Star Schema?
+Interview answer
+
+"A Star Schema is a data warehouse design where we have a central fact table surrounded by multiple dimension tables. The fact table contains measurable business data such as sales amount or transaction quantity, while dimension tables contain descriptive information such as customer, product, date and location.
+
+I would use Star Schema when the primary requirement is analytical reporting because it simplifies queries and makes BI workloads easier to understand."
+
+Example
+                 Dim_Customer
+                      |
+                      |
+Dim_Date ---- Fact_Sales ---- Dim_Product
+                      |
+                      |
+                 Dim_Store
+
+Example:
+
+Fact_Sales
+-----------
+Date_Key
+Customer_Key
+Product_Key
+Store_Key
+Sales_Amount
+Quantity
+
+Dimensions:
+
+Dim_Customer
+Customer_Key
+Customer_Name
+City
+Follow-up
+
+Why is it called Star Schema?
+
+"Because the fact table is in the center and dimension tables surround it, forming a star-like structure."
+
+2. What does SQL mean?
+Interview answer
+
+"SQL stands for Structured Query Language. It is used to interact with relational databases for querying, manipulating and defining data."
+
+You can mention major categories:
+
+DDL → CREATE, ALTER, DROP
+DML → INSERT, UPDATE, DELETE
+DQL → SELECT
+DCL → GRANT, REVOKE
+TCL → COMMIT, ROLLBACK
+3. What is a SQL Function?
+
+A function is a database object that performs a specific operation and returns a value.
+
+Example:
+
+CREATE FUNCTION dbo.fn_GetAnnualSalary
+(
+    @MonthlySalary DECIMAL(10,2)
+)
+RETURNS DECIMAL(10,2)
+AS
+BEGIN
+    RETURN @MonthlySalary * 12;
+END;
+
+Usage:
+
+SELECT dbo.fn_GetAnnualSalary(50000);
+Interview answer
+
+"A SQL function is generally used for reusable logic that returns a value or, depending on the function type, a result set. It can be called from SQL statements."
+
+4. What is a Stored Procedure?
+Interview answer
+
+"A Stored Procedure is a named collection of SQL statements stored in the database and executed as a unit. It is commonly used for business logic, ETL operations, DML operations and database-side processing.
+
+Stored procedures can accept input parameters and can contain multiple SQL statements, conditional logic and transaction handling."
+
+Example:
+
+CREATE PROCEDURE dbo.usp_UpdateEmployeeSalary
+    @EmpID INT,
+    @Salary DECIMAL(10,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE Employee
+    SET Salary = @Salary
+    WHERE EmpID = @EmpID;
+END;
+5. Stored Procedure vs Function
+
+This is a very common interview question.
+
+Feature	Stored Procedure	Function
+Return	Can return result sets/output parameters	Returns a value/table
+Called from SELECT	Generally no	Yes, depending on type
+DML	✅ Commonly used	Restrictions apply depending on function/type
+Multiple statements	✅	Possible within restrictions
+Parameters	✅	✅
+Transactions	Can use transaction logic	More restricted
+Main use	Procedures/business operations	Reusable calculations/query expressions
+Best 5-year answer
+
+"I use a stored procedure when I need to perform database operations such as inserts, updates, deletes, ETL logic or multiple procedural steps. I use a function when I need reusable calculation or query logic that returns a value or table. The choice depends on the requirement rather than assuming one is always better."
+
+6. LIMIT vs TOP
+TOP
+
+Used in SQL Server:
+
+SELECT TOP 10 *
+FROM Employee
+ORDER BY Salary DESC;
+LIMIT
+
+Common in systems such as MySQL and PostgreSQL:
+
+SELECT *
+FROM Employee
+ORDER BY Salary DESC
+LIMIT 10;
+Interview answer
+
+"TOP is commonly used in SQL Server to limit the number of rows returned, while LIMIT is used in several other SQL dialects. Since my work can involve SQL Server/Azure SQL, I would generally use TOP in T-SQL."
+
+Important
+
+If you want the highest salaries, use ORDER BY:
+
+SELECT TOP 10 *
+FROM Employee
+ORDER BY Salary DESC;
+
+Without ORDER BY, the selected rows aren't guaranteed to represent the highest salaries.
+
+7. Primary Key vs Unique Key
+Interview answer
+
+"A primary key uniquely identifies each row and cannot contain NULL values. A table can have only one primary key constraint, although it can be composite. A table can have multiple unique constraints to enforce uniqueness on other columns."
+
+Example:
+
+CREATE TABLE Employee
+(
+    EmpID INT PRIMARY KEY,
+    Email VARCHAR(100) UNIQUE,
+    Name VARCHAR(100)
+);
+
+Here:
+
+EmpID → Primary Key
+Email → Unique Key
+Important SQL Server point
+
+For SQL Server, don't say:
+
+"A unique constraint allows unlimited NULLs."
+
+A nullable unique column generally permits a single NULL under SQL Server's standard unique constraint behavior.
+
+8. DELETE vs TRUNCATE vs DROP
+
+This is a must-know interview question.
+
+	DELETE	TRUNCATE	DROP
+Removes rows	✅	✅	✅
+Removes table structure	❌	❌	✅
+WHERE allowed	✅	❌	❌
+Fully logged row-by-row	Generally yes	Minimally logged page/deallocation style	DDL operation
+Identity reset in SQL Server	No	Usually yes	Table removed
+Table remains	✅	✅	❌
+DELETE
+DELETE FROM Employee
+WHERE Department = 'IT';
+
+Deletes selected rows.
+
+TRUNCATE
+TRUNCATE TABLE Employee;
+
+Removes all rows but keeps the table.
+
+DROP
+DROP TABLE Employee;
+
+Removes the table definition and its data.
+
+Interview answer
+
+"DELETE is used when I need row-level deletion and supports WHERE. TRUNCATE removes all rows while retaining the table structure, and DROP removes the table itself."
+
+9. RDD vs DataFrame — Why DataFrame?
+
+This is specifically present in your material.
+
+RDD
+
+RDD is the lower-level distributed collection abstraction.
+
+DataFrame
+
+DataFrame is a distributed dataset organized into named columns and allows Spark's SQL engine to optimize queries.
+
+Best interview answer
+
+"I prefer DataFrames for most modern PySpark data-processing workloads because they provide a structured schema and allow Spark's Catalyst optimizer and Tungsten-related execution improvements to optimize the workload. They are also easier to use for SQL-like transformations than raw RDDs.
+
+I would use RDDs when I specifically need lower-level control that isn't conveniently available through DataFrame APIs."
+
+Simple comparison
+RDD	DataFrame
+Low-level	Higher-level
+No named schema by default	Structured schema
+More manual processing	SQL/DataFrame operations
+Less optimizer-friendly	Catalyst optimization
+More coding	More concise
+Don't say
+
+"RDD is always slower."
+
+Better:
+
+"For structured data-processing workloads, DataFrames are generally preferred because Spark can optimize them more effectively."
+
+10. Transformation vs Action
+
+This is directly listed in the material.
+
+Transformation
+
+Creates a new DataFrame/RDD and is lazily evaluated.
+
+Examples:
+
+filter()
+select()
+withColumn()
+join()
+groupBy()
+Action
+
+Triggers execution.
+
+Examples:
+
+count()
+show()
+collect()
+write()
+Interview answer
+
+"Transformations define the processing plan, while actions trigger execution of that plan."
+
+11. Which ADF activities are commonly used in your pipeline?
+Strong answer
+
+"Depending on the pipeline, I typically use Copy Activity for data movement, Lookup for control/configuration data, Get Metadata for file metadata, ForEach for iterating through tables or files, If Condition for branching logic, Stored Procedure or Script activities for database operations, and Databricks Notebook activity when Spark transformation is required."
+
+Example
+Lookup
+   ↓
+ForEach
+   ↓
+If Condition
+   ↓
+Copy Activity
+   ↓
+Databricks
+   ↓
+Stored Procedure
+
+This is much stronger than merely listing activity names.
+
+12. What is Copy Activity?
+Answer
+
+"Copy Activity is primarily used for moving data from a source to a destination. For example, SQL Server to ADLS Gen2, Azure SQL to Lakehouse, or files to a database."
+
+Follow-up
+
+How do you optimize Copy Activity?
+
+"I check the source query, Integration Runtime, parallel copy, partitioning, incremental loading, source/sink throughput and monitoring metrics before making changes."
+
+13. What are ADF Trigger Types?
+
+Your material specifically lists Scheduled, Event, Tumbling Window and Manual triggers.
+
+Scheduled Trigger
+
+"Used to run a pipeline at a defined schedule, such as daily at 5 AM."
+
+Event Trigger
+
+"Used when pipeline execution should be triggered by an event, such as the arrival of a file."
+
+Tumbling Window
+
+"Used for fixed time windows and scenarios where every window must be processed, including dependency and backfill use cases."
+
+Manual
+
+"Used to start a pipeline manually when required."
+
+14. Scheduled vs Tumbling Window
+Interviewer:
+
+"A financial pipeline processes hourly historical data, and if one hour is missed, it must be processed later. Which trigger?"
+
+Answer
+
+"I would consider a Tumbling Window trigger because the processing is based on defined time windows and the requirement includes handling missed windows/backfill."
+
+The source material specifically describes Tumbling Window in this historical/backfill context.
+
+15. What is a Linked Service?
+Answer
+
+"A Linked Service defines the connection information required to connect ADF to a source or destination."
+
+Example:
+
+ADF
+ ↓
+SQL Linked Service
+ ↓
+SQL Server
+
+Another:
+
+ADF
+ ↓
+ADLS Linked Service
+ ↓
+ADLS Gen2
+16. Power BI Gold Layer Has 95 Records Instead of 100. How Will You Find the Missing 5?
+
+This is directly from the interview material.
+
+Excellent 5-year answer
+
+"I would first establish whether the discrepancy exists in the Gold layer or earlier in the pipeline.
+
+I would compare source and Gold record counts, and then compare the business keys using an anti-join to identify exactly which records are missing.
+
+Once I identify the missing keys, I would trace them backward from Gold to Silver, Bronze and the source to identify where they were lost."
+
+SQL
+SELECT s.CustomerID
+FROM SourceTable s
+LEFT JOIN GoldTable g
+    ON s.CustomerID = g.CustomerID
+WHERE g.CustomerID IS NULL;
+
+This gives the records present in source but missing in Gold.
+
+Then investigate
+Source
+  ↓
+Bronze
+  ↓
+Silver
+  ↓
+Gold
+  ↓
+Power BI
+
+Check:
+
+Filters
+Joins
+Duplicate removal
+Incremental watermark
+Failed records
+Transformation logic
+Pipeline execution
+Strong interview statement
+
+"I don't troubleshoot only from the Power BI side; I trace the data lineage backward to identify the stage where the records were lost."
+
+17. Third Highest Salary
+
+Your query is correct for the third distinct highest salary:
+
+SELECT salary
+FROM
+(
+    SELECT salary,
+           DENSE_RANK() OVER (ORDER BY salary DESC) AS rank1
+    FROM emp
+) AS high_sal
+WHERE rank1 = 3;
+Example
+
+Suppose:
+
+100000
+90000
+90000
+80000
+70000
+
+DENSE_RANK() gives:
+
+100000 → 1
+90000  → 2
+90000  → 2
+80000  → 3
+70000  → 4
+
+Therefore:
+
+Third distinct highest = 80000
+Interviewer may ask:
+
+"What if I want the third employee, even when salaries are duplicated?"
+
+Then use:
+
+SELECT *
+FROM
+(
+    SELECT e.*,
+           ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn
+    FROM emp e
+) t
+WHERE rn = 3;
+Important distinction
+ROW_NUMBER() → third row
+DENSE_RANK() → third distinct salary
+RANK()       → third rank, with gaps after ties
+🔥 The follow-up questions you should expect
+
+After this round, the interviewer can go deeper:
+
+Main Topic	Likely Follow-up
+Star Schema	Star vs Snowflake schema
+Primary Key	Composite primary key
+Unique Key	Multiple unique constraints
+Index	Clustered vs non-clustered
+Index	When an index can hurt performance
+Ranking	ROW_NUMBER vs RANK vs DENSE_RANK
+Joins	LEFT JOIN + WHERE behavior
+Self Join	Employee-manager hierarchy
+CTE	CTE vs temp table
+CTE	Can CTE perform UPDATE/DELETE?
+ADF	Metadata-driven pipeline
+Copy Activity	70% failure recovery
+Trigger	Scheduled vs Tumbling Window
+Linked Service	Linked Service vs Dataset
+Missing data	Source-to-target reconciliation
+SQL	3rd highest salary with duplicate salaries
+PySpark	RDD vs DataFrame
+Spark	Lazy evaluation
+Spark	Shuffle/Data skew
+Spark	Broadcast vs Sort Merge Join
+⭐ One major improvement for your 5-year interview
+
+For every answer, try to add one production sentence.
+
+For example, don't stop at:
+
+"An index improves query performance."
+
+Say:
+
+"An index can improve query performance, but I first check the execution plan because indexes also add storage and write-maintenance overhead."
+
+And instead of:
+
+"Incremental loading processes new records."
+
+Say:
+
+"I implement incremental loading using a watermark/control table and update the watermark only after successful processing so that failures don't cause data loss."
+
+That style is what will make your answers sound like 5 years of practical Data Engineering experience rather than memorized definitions.

@@ -1,0 +1,820 @@
+================================================================================
+ INTERVIEW ROUND - MODEL ANSWERS (SQL + ADF + INDEXING)
+ Candidate profile: Data Engineer, ~5 years experience
+ Source: actual interview question list (screenshot notes)
+================================================================================
+
+QUESTION LIST COVERED
+---------------------
+ 1.  Introduction / self-intro
+ 2.  "Tooling in the project" / your role (also: data modelling)
+ 3.  Primary key vs Unique key
+ 4.  Incremental pipeline
+ 5.  Indexing - what it is and why we use it
+ 6.  Types of indexing
+ 7.  RANK vs ROW_NUMBER vs DENSE_RANK
+ 8.  Can LEFT JOIN be replaced by INNER JOIN?
+ 9.  Self join
+10.  CTE vs Create Table vs View
+11.  50 tables - 40 incremental + 10 full daily, implement in ADF
+12.  Copy was 70% done and failed - how do you handle it?
+13.  Can we do INSERT / UPDATE / DELETE in a CTE?
+14.  How do you optimize a stored procedure?
+15.  Closing prep checklist
+
+
+================================================================================
+1. INTRODUCTION (SELF-INTRO)
+================================================================================
+
+Keep it to 60-90 seconds. Structure: NOW -> STACK -> ONE FLAGSHIP PROJECT -> IMPACT.
+
+Sample script:
+
+Good morning, and thank you for giving me the opportunity to introduce myself.
+
+I’m a Data Engineer with around 6 years of total IT experience, including 4 years of experience with Python and around 3 years of hands-on experience with PySpark, Databricks, and Azure Data Factory.
+
+I started my career with Tata Communications, where I worked in the network domain, handling network operations, troubleshooting, and production support. This helped me build strong problem-solving and troubleshooting skills.
+
+For the last 4 years, I have been working in my current organization, where I transitioned into Python development, automation, and Data Engineering. My core technologies include Python, SQL, PySpark, Databricks, Azure Data Factory, and Azure Data Lake.
+
+In my current project, I work on ETL and data pipelines, including data ingestion, transformation, cleansing, joins, aggregations, incremental loading, and data validation. I use ADF for orchestration, ADLS for data storage, and Databricks with PySpark for large-scale data processing.
+
+I have also worked on Medallion Architecture, Delta tables, star-schema modelling, and SCD Type 1 and Type 2. From a performance perspective, I have experience with partitioning, broadcast joins, reducing unnecessary shuffles, handling data skew, and optimizing Spark jobs.
+
+One of my key strengths is problem-solving and optimization. I focus on understanding the root cause and building solutions that are reliable, scalable, and efficient.
+
+I’m now looking for an opportunity where I can leverage my Python, PySpark, Databricks, SQL, and Azure Data Engineering experience and work on more challenging, large-scale data solutions.
+
+Thank you.
+
+
+
+================================================================================
+2. "WHAT IS TOOLING IN THE PROJECT?" / YOUR ROLE
+================================================================================
+
+Read this as: what is your stack, and what do YOU personally own.
+Answer in three layers:
+
+  Ingestion / orchestration
+    - ADF: pipelines, linked services, parameterised datasets, triggers
+    - Self-hosted Integration Runtime for on-prem sources
+
+  Storage & processing
+    - ADLS Gen2 (bronze / silver / gold)
+    - Databricks + PySpark, or SQL stored procedures
+    - Delta or Parquet file formats
+
+  Serving & operations
+    - Azure SQL / Synapse dedicated pool, Power BI
+    - Git integration with dev / UAT / prod release pipelines
+    - Log Analytics + email alerts on failure
+
+Then state explicitly what YOU built versus what the team built. At 5 years,
+interviewers are checking ownership, not just familiarity.
+
+IF THE QUESTION WAS ACTUALLY ABOUT DATA MODELLING:
+  - Dimensional modelling (Kimball)
+  - Fact tables at transaction grain, conformed dimensions
+  - Surrogate keys generated in the warehouse
+  - SCD Type 2 on dimensions that need history
+  - A 3NF-ish staging layer before the star schema
+
+
+================================================================================
+3. PRIMARY KEY vs UNIQUE KEY
+================================================================================
+
+                    PRIMARY KEY                 UNIQUE KEY
+  ----------------  --------------------------  ------------------------------
+  NULLs             Not allowed                 Allowed (1 NULL in SQL Server,
+                                                many in Oracle / Postgres)
+  Count per table   Exactly one                 Many
+  Default index     Clustered (SQL Server)      Nonclustered
+  Purpose           Identifies the row          Enforces a business rule
+
+The line that lands well:A primary key is about IDENTITY. A unique key is about a BUSINESS RULE.
+
+Example:EmployeeID  -> primary key
+  Email, PAN  -> unique keys (real attributes that must not duplicate, but
+                 may still be missing for some rows)
+
+Warehouse angle (adds seniority):
+  Use a SURROGATE key (identity / sequence / hash) as the primary key, and
+  keep the natural / business key as a unique constraint - so source-system
+  key changes do not ripple into your fact tables.
+
+
+================================================================================
+4. INCREMENTAL PIPELINE
+================================================================================
+
+WATERMARK (HIGH-WATER MARK) APPROACH - the most common:
+
+  Step 1  Keep a control table:
+            SourceTable, LoadType, WatermarkColumn, LastWatermarkValue, IsActive
+
+  Step 2  Read LastWatermarkValue for the table.
+
+  Step 3  Read the current max from source:
+            SELECT MAX(ModifiedDate) FROM src.Orders
+
+  Step 4  Copy only:
+            WHERE ModifiedDate >  @last
+              AND ModifiedDate <= @current
+          (bounded on BOTH sides, so rows arriving mid-run are not silently
+           skipped or double-counted)
+
+  Step 5  Load into a STAGING table, then MERGE into the target.
+
+  Step 6  Only AFTER the merge succeeds, update the watermark to @current.
+
+* Step 6 ordering is the whole trick: watermark updates LAST, so a failure
+    means the next run replays the same window -> the pipeline is idempotent.
+
+MERGE example:
+
+  MERGE dbo.DimCustomer AS tgt
+  USING stg.Customer AS src
+      ON tgt.CustomerBK = src.CustomerBK
+  WHEN MATCHED AND EXISTS (
+        SELECT src.Name, src.City
+        EXCEPT
+        SELECT tgt.Name, tgt.City)
+      THEN UPDATE SET tgt.Name = src.Name,
+                      tgt.City = src.City,
+                      tgt.UpdatedAt = SYSUTCDATETIME()
+  WHEN NOT MATCHED BY TARGET
+      THEN INSERT (CustomerBK, Name, City)
+           VALUES (src.CustomerBK, src.Name, src.City);
+
+OTHER MECHANISMS AND WHEN TO PICK THEM:
+  - CDC / Change Tracking (SQL Server), or log-based CDC (Debezium style)
+    -> when you need DELETES and every intermediate change, not just the
+       latest state
+  - ADF Copy with CDC, or Databricks Auto Loader / readStream with
+    checkpoints -> for file-based sources
+  - Delta Lake MERGE + CHANGE DATA FEED -> if you are on Databricks
+
+EXPECTED FOLLOW-UPS:
+  Q: How do you handle hard deletes?
+  A: Soft-delete flag from CDC, or a periodic full key reconciliation.
+
+  Q: What if there is no reliable modified date?
+  A: Hash the row and compare, or fall back to full load for that table.
+
+
+================================================================================
+5. INDEXING - WHAT IT IS AND WHY WE USE IT
+================================================================================
+
+WHAT:
+  A separate, ordered structure (usually a B+ tree) holding the key columns
+  plus a pointer to the row. It lets the engine SEEK to the rows it needs
+  instead of scanning the whole table.
+
+WHY:
+  - Reduce logical reads and I/O -> faster WHERE / JOIN / ORDER BY / GROUP BY
+  - Enforce uniqueness
+  - Support covering queries, where the index alone answers the query with
+    no table access at all
+
+THE COST - always say this part, it separates 5 years from 1 year:
+  - Every index adds write overhead on INSERT / UPDATE / DELETE
+  - Consumes storage
+  - Needs maintenance (fragmentation, statistics)
+  - Too many indexes can push the optimizer toward worse plans
+
+  => Index for your ACTUAL query patterns, not "just in case".
+
+
+================================================================================
+6. TYPES OF INDEXING
+================================================================================
+
+  CLUSTERED        Defines the physical order of the table. One per table.
+                   The table IS the index (leaf level = the data row).
+
+  NONCLUSTERED     Separate structure with a pointer (row locator /
+                   clustering key) back to the data. Many per table.
+
+  UNIQUE           Enforces uniqueness; backs PK / UK constraints.
+
+  COMPOSITE        Multi-column. Column ORDER matters - the leading column
+                   drives seekability.
+
+  COVERING         Nonclustered with INCLUDE (...) columns, so the query
+                   never touches the base table. Avoids key lookups.
+
+  FILTERED         e.g. WHERE IsActive = 1. Smaller and cheaper for
+                   selective subsets.
+
+  COLUMNSTORE      Clustered or nonclustered. Column-oriented and
+                   compressed. The right choice for analytical scans and
+                   aggregations over large fact tables.
+
+  SPECIALISED      Full-text, XML, spatial, and HASH indexes in
+                   In-Memory OLTP.
+
+LAKEHOUSE EQUIVALENTS (mention if the role is Databricks / Fabric oriented):
+  - Partitioning
+  - Z-ORDER / Liquid Clustering
+  - Bloom filters
+  - Delta data-skipping via file statistics
+  NOTE: Delta has no B-tree index - it PRUNES FILES.
+
+
+================================================================================
+7. RANK vs ROW_NUMBER vs DENSE_RANK
+================================================================================
+
+All three are WINDOW functions and require OVER (ORDER BY ...), optionally
+with PARTITION BY.
+
+  ROW_NUMBER()   Always unique and sequential. Ties broken arbitrarily.
+  RANK()         Ties share a rank, then it SKIPS numbers (gaps appear).
+  DENSE_RANK()   Ties share a rank, NO gaps.
+
+Example with salaries 5000, 4000, 4000, 3000:
+
+  Salary   ROW_NUMBER   RANK   DENSE_RANK
+  ------   ----------   ----   ----------
+   5000        1          1        1
+   4000        2          2        2
+   4000        3          2        2
+   3000        4          4        3
+
+PRACTICAL USES:
+  ROW_NUMBER  -> deduplication, pagination
+  DENSE_RANK  -> "top 3 salaries" where ties should count once
+  RANK        -> competition-style ranking
+  Also mention: NTILE for bucketing, LAG / LEAD for row-over-row comparison.
+
+DEDUPE PATTERN (very common follow-up):
+
+  WITH dupes AS (
+      SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY Email
+                                ORDER BY UpdatedAt DESC) AS rn
+      FROM dbo.Customer
+  )
+  DELETE FROM dupes WHERE rn > 1;
+
+
+================================================================================
+8. CAN A LEFT JOIN BE REPLACED BY AN INNER JOIN?
+================================================================================
+
+SHORT ANSWER: Generally NO.
+  A LEFT JOIN keeps unmatched left rows with NULLs on the right side.
+  An INNER JOIN drops them.
+
+STRONG ANSWER - name the cases where they ARE equivalent, because that is
+what the interviewer is fishing for:
+
+  1. REFERENTIAL INTEGRITY GUARANTEES A MATCH
+     The join column is a NOT NULL foreign key to the right table's key, so
+     every left row matches. Same result - and some optimizers will convert
+     the join or eliminate it entirely.
+
+  2. YOU FILTER ON A RIGHT-SIDE COLUMN IN THE WHERE CLAUSE  <-- the big one
+       LEFT JOIN b ON a.id = b.id WHERE b.status = 'X'
+     This discards exactly the NULL-extended rows, so it behaves as an
+     INNER JOIN. Putting that same predicate in the ON clause instead
+     PRESERVES LEFT JOIN semantics.
+     The ON-vs-WHERE distinction is a very common follow-up question.
+
+  3. DOWNSTREAM LOGIC DROPS THE NULLs ANYWAY
+     e.g. INNER JOINing the result to something else on the right-side
+     column, or an aggregate that ignores NULLs.
+
+ONE MORE POINT MOST CANDIDATES GET WRONG:
+  A LEFT JOIN does NOT guarantee the left table's row count is preserved.
+  If the right side has multiple matches per key, rows MULTIPLY.
+  Only a one-to-one or many-to-one relationship preserves the count -
+  which is why you always check GRAIN before joining.
+
+
+================================================================================
+9. SELF JOIN
+================================================================================
+
+A table joined to itself, using aliases to treat it as two logical tables.
+
+Classic employee-manager hierarchy:
+
+  SELECT e.EmpID,
+         e.EmpName,
+         m.EmpName AS ManagerName
+  FROM dbo.Employee AS e
+  LEFT JOIN dbo.Employee AS m
+      ON e.ManagerID = m.EmpID;
+
+LEFT JOIN here ON PURPOSE - otherwise the CEO, who has no manager,
+disappears. Nice callback to question 8.
+
+OTHER REAL USES:
+  - Finding duplicates
+  - Comparing a row to the previous row (though LAG is better now)
+  - Non-equi self joins, e.g. "employees earning more than their manager"
+
+If asked about DEEP hierarchies -> use a RECURSIVE CTE instead of chaining
+self joins.
+
+
+================================================================================
+10. CTE vs TABLE vs VIEW
+================================================================================
+
+CTE (Common Table Expression)
+  - A named result set that exists only for the duration of a SINGLE
+    statement.
+  - Not materialised. No storage, no indexes. Essentially a readable
+    inline view.
+  - Two things it gives you that a subquery does not: RECURSION, and being
+    referenceable multiple times in the same statement.
+  - CAVEAT to mention: SQL Server may RE-EVALUATE a CTE each time it is
+    referenced, so for expensive logic reused several times a #temp table
+    is often faster.
+
+VIEW
+  - A stored, named query in the database.
+  - Reusable across sessions, supports permissions, hides complexity.
+  - A plain view stores no data; an INDEXED / MATERIALISED view does.
+  - Simple single-table views are updatable. Nested views hurt plan quality.
+
+  CREATE VIEW dbo.vw_ActiveOrders AS
+  SELECT OrderID, CustomerID, OrderDate, Amount
+  FROM dbo.Orders
+  WHERE IsActive = 1;
+
+TABLE / TEMP TABLE
+  - Actually stores data. Can be indexed. Has statistics.
+  - #temp for large intermediate sets inside procedures.
+  - Table VARIABLES only for small row counts - they historically get poor
+    cardinality estimates.
+
+
+================================================================================
+11. 50 TABLES IN ADF - 40 INCREMENTAL, 10 FULL DAILY
+================================================================================
+
+The answer they want: METADATA-DRIVEN, ONE PIPELINE - not 50 pipelines.
+
+CONTROL TABLE (in Azure SQL):
+
+  CREATE TABLE meta.LoadConfig (
+      ConfigID         INT IDENTITY PRIMARY KEY,
+      SourceSchema     SYSNAME,
+      SourceTable      SYSNAME,
+      LoadType         VARCHAR(10),      -- 'FULL' or 'INCREMENTAL'
+      WatermarkColumn  SYSNAME NULL,
+      LastWatermark    DATETIME2 NULL,
+      TargetPath       NVARCHAR(400),
+      IsActive         BIT DEFAULT 1
+  );
+
+PIPELINE DESIGN:
+
+  1. LOOKUP activity
+       SELECT * FROM meta.LoadConfig WHERE IsActive = 1
+
+  2. FOREACH over the result
+       isSequential = false
+       batch count tuned to about 8-15, so you do not saturate the source
+       or the Integration Runtime
+
+  3. Inside ForEach, an IF CONDITION (or SWITCH) on @item().LoadType
+
+       FULL branch
+         Copy with  SELECT * FROM @{item().SourceSchema}.@{item().SourceTable}
+         Sink: overwrite / truncate-load
+
+       INCREMENTAL branch
+         a) Lookup current max watermark
+         b) Copy with a dynamic query bounded by
+              > LastWatermark AND <= CurrentWatermark
+         c) Stored Procedure activity -> MERGE staging into target
+         d) Stored Procedure activity -> update LastWatermark
+
+  4. PARAMETERISED DATASETS
+       One source dataset and one sink dataset, with schema / table / path
+       as parameters. This is what keeps you at TWO datasets instead of a
+       hundred.
+
+  5. AUDIT / LOGGING TABLE
+       Write at start and end of each table's load: run ID, table name,
+       rows copied, duration, status, error message.
+
+POINTS THAT IMPRESS:
+  - Keep the two branches as separate CHILD PIPELINES invoked by Execute
+    Pipeline -> cleaner monitoring and independent reruns
+  - Know the ForEach limits: 100,000 items, and no nested ForEach
+  - Use a SWITCH if you later add load types like CDC or SCD2
+  - Split very large tables into partitioned CHUNKS, so a failure retries
+    only one chunk
+  - IsActive lets ops disable a problem table without a deployment
+
+
+================================================================================
+12. "COPY WAS 70% DONE AND IT FAILED - HOW DO YOU HANDLE IT?"
+================================================================================
+
+Frame it as TWO questions:
+  (a) How do I recover this run?
+  (b) How do I make sure a partial failure can NEVER corrupt the target?
+
+(a) IMMEDIATE RECOVERY
+  - Check the Copy activity error in ADF Monitor: throttling, transient
+    network, timeout, data-type mismatch, or sink capacity.
+  - Use "Rerun from failed activity" - replays only what failed, not the
+    whole pipeline.
+  - Set RETRY COUNT and RETRY INTERVAL on the activity so transient
+    failures self-heal.
+
+(b) DESIGN SO PARTIAL DATA IS NEVER A PROBLEM  <-- the real answer
+
+  - NEVER WRITE DIRECTLY INTO THE TARGET.
+    Copy into a STAGING table that you TRUNCATE at the start of each run,
+    then MERGE / INSERT from staging into the target inside a transaction.
+    A failed copy leaves garbage only in staging, and the rerun truncates
+    it -> the pipeline is IDEMPOTENT.
+
+  - UPDATE THE WATERMARK ONLY AFTER the load fully succeeds. A failure at
+    70% means the next run re-reads the same window from the beginning.
+    No gap, no duplicates.
+
+  - FOR FILE SINKS: write to a temp / _staging folder or a run-ID-stamped
+    partition, and promote it only on success. Or rely on OVERWRITE
+    behaviour so the rerun replaces the partial file rather than appending.
+
+  - CHUNK LARGE LOADS by date range or key range, with per-chunk status in
+    the control table - so a failure re-runs one chunk instead of 300
+    million rows.
+
+  - ENABLE STAGING (PolyBase / COPY command) for Synapse sinks, and tune
+    writeBatchSize. A partially committed batch insert is the usual cause
+    of "70% then failed".
+
+  - FAULT TOLERANCE settings on Copy: skip incompatible rows and log them
+    to blob, so one bad row does not kill a 10-hour load. Then reconcile
+    the skipped-rows log.
+
+  - ROW-COUNT RECONCILIATION between source and target after load. Fail
+    the pipeline loudly on mismatch rather than silently succeeding.
+
+IF THEY ASK WHETHER COPY ACTIVITY IS TRANSACTIONAL:
+  It is NOT. It commits in batches, so AT-LEAST-ONCE is what the tool
+  gives you. EXACTLY-ONCE has to come from your staging + merge design.
+
+
+================================================================================
+13. CAN WE DO INSERT / UPDATE / DELETE IN A CTE?
+================================================================================
+
+YES - with an important distinction. Most candidates get this half-right.
+
+IN SQL SERVER:
+
+  - A CTE can FEED DML:
+      WITH c AS (SELECT ...)
+      INSERT INTO target SELECT * FROM c;
+
+  - A CTE can be the TARGET of UPDATE, DELETE or MERGE, provided it is
+    UPDATABLE: one base table, and no aggregates, DISTINCT, GROUP BY,
+    UNION or TOP.
+    The dedupe example in section 7 is exactly this -
+      DELETE FROM dupes WHERE rn > 1
+    deletes from the UNDERLYING TABLE through the CTE.
+
+  - WHAT YOU CANNOT DO: put the DML statement INSIDE the WITH clause.
+      WITH c AS (DELETE FROM t ...)     -- INVALID in SQL Server
+    Also, a RECURSIVE CTE is not updatable.
+
+IN POSTGRESQL it is different - data-modifying CTEs are fully supported:
+
+  WITH d AS (DELETE FROM t WHERE ... RETURNING *)
+  INSERT INTO archive SELECT * FROM d;
+
+  A great one-statement archive-and-delete. Mentioning that you know the
+  DIALECTS DIFFER here is a strong signal.
+
+SCOPE RULE: a CTE lives for exactly ONE statement. You cannot define it and
+then use it in the next statement - that is what a temp table or view is for.
+
+
+================================================================================
+14. HOW DO YOU OPTIMIZE A STORED PROCEDURE?
+================================================================================
+
+Answer methodically - MEASURE FIRST, then fix. Do not just recite tips.
+
+DIAGNOSE
+  - Look at the ACTUAL execution plan, and SET STATISTICS IO, TIME ON.
+    Hunt for:
+      * scans where seeks are expected
+      * key lookups
+      * spills to tempdb
+      * big gaps between estimated and actual rows (statistics or
+        parameter-sniffing problem)
+  - Use Query Store / sys.dm_exec_query_stats to find WHICH statement
+    inside the proc actually costs the time. Usually one dominates.
+
+FIX - in rough order of impact
+
+  1. MAKE PREDICATES SARGABLE. No functions on indexed columns.
+       BAD : WHERE CAST(OrderDate AS DATE) = @d
+       GOOD: WHERE OrderDate >= @d AND OrderDate < DATEADD(DAY,1,@d)
+     Avoid leading wildcards ('%abc') and implicit conversions from
+     mismatched data types.
+
+  2. INDEX PROPERLY - covering indexes with INCLUDE to kill key lookups,
+     correct leading column, and drop unused / duplicate indexes.
+
+  3. SELECT ONLY THE COLUMNS YOU NEED, and filter as early as possible.
+
+  4. REPLACE CURSORS and row-by-row loops with SET-BASED operations.
+     Usually the single biggest win in legacy procs.
+
+  5. REMOVE SCALAR UDFs from SELECT / WHERE - inline them or convert to
+     inline table-valued functions. (SQL Server 2019+ can inline them
+     automatically, but do not rely on it.)
+
+  6. HANDLE PARAMETER SNIFFING - OPTION (RECOMPILE) for wildly varying
+     parameters, OPTIMIZE FOR UNKNOWN, local variable copies, or split
+     into separate code paths instead of one catch-all proc.
+
+  7. USE #TEMP TABLES OVER TABLE VARIABLES for large intermediate sets
+     (temp tables get statistics). Index the temp table if you join to it
+     repeatedly.
+
+  8. BATCH LARGE DML into chunks of 10k-50k rows to limit log growth,
+     lock escalation and blocking.
+
+  9. SET NOCOUNT ON to cut chatter. Keep transactions as short as
+     possible. Use TRY / CATCH with proper rollback.
+
+ 10. SCHEMA-QUALIFY OBJECT NAMES (dbo.Proc) to avoid cache misses and
+     unnecessary recompiles.
+
+ 11. KEEP STATISTICS AND FRAGMENTATION MAINTAINED, and avoid deeply
+     nested views that wreck cardinality estimates.
+
+CLOSE WITH THE MEASUREMENT:
+  "I reduced logical reads from X to Y and runtime from N minutes to M."
+  Concrete numbers from your own project are what make this credible.
+
+
+================================================================================
+15. CLOSING PREP CHECKLIST
+================================================================================
+
+These notes show where the interviewer was heading. Before the next round,
+prepare:
+
+  [ ] A crisp 2-minute walkthrough of your ADF metadata-driven framework,
+      with ACTUAL table counts and runtimes.
+
+  [ ] One story about a PRODUCTION FAILURE you diagnosed and then made
+      structurally impossible to repeat.
+
+  [ ] Your own before/after numbers for one optimization (rows, minutes,
+      logical reads, cost).
+
+Questions 11 and 12 were setups for exactly the first two.
+
+================================================================================
+END OF FILE
+================================================================================
+
+
+Q1. What is Azure Data Factory, and how would you describe it to someone non-technical?
+
+Simple answer: ADF is a cloud service that moves and transforms data between systems on a schedule, without needing servers you manage.
+Detailed: It's an orchestration and data integration service — it doesn't process data itself (that's Databricks/Data Flows' job); it coordinates movement and transformation across sources like Oracle, Azure SQL, ADLS, APIs.
+Real example: "In my current project, ADF orchestrates ingestion of multi-source billing data — Oracle, flat files, APIs — into ADLS Gen2, then triggers Databricks notebooks for transformation."
+Interview tip: Always distinguish ADF (orchestration) from Databricks (compute/transformation) — conflating them is a common junior mistake.
+
+Q2. Difference between Pipeline, Activity, and Dataset?
+
+Pipeline = a logical grouping of activities that together perform a task.
+Activity = a single step (Copy, Lookup, ForEach, etc.).
+Dataset = a named reference to data (schema + location) that activities read/write.
+Follow-up they may ask: "Can one dataset be used across multiple pipelines?" — Yes, that's the point of decoupling datasets from pipelines.
+
+Q3. What is a Linked Service?
+
+A connection string/config object that tells ADF how to connect to a source or sink (auth, endpoint). Datasets reference Linked Services; Linked Services don't reference datasets.
+Production note: Best practice is to use Managed Identity or Key Vault-backed Linked Services instead of hardcoded credentials — mention this proactively, it signals security maturity.
+
+Q4. What's the difference between Copy Activity and Data Flow?
+
+Copy Activity = simple move/light transform (column mapping, type conversion), runs on Azure IR, cheap and fast.
+Data Flow = visual, Spark-based transformation (joins, aggregations, pivots) — runs on spun-up Spark clusters, more expensive, more powerful.
+Real answer angle: "For simple ingestion I use Copy Activity; for anything needing joins or aggregation before landing, I've typically pushed that into Databricks notebooks instead of Data Flows, since our team standardized on Databricks for transformation logic — that's actually a common real-world pattern, mention it if true for you."
+
+Q5. What is Integration Runtime (IR)? Types?
+
+IR is the compute infrastructure ADF uses to execute activities.
+Azure IR — fully managed, for cloud-to-cloud.
+Self-Hosted IR — installed on-prem/VM, for connecting to on-prem sources (e.g., on-prem Oracle/SQL Server) behind a firewall.
+Azure-SSIS IR — for lifting-and-shifting legacy SSIS packages.
+Production example: "We used Self-Hosted IR to connect to an on-prem Oracle 19c database sitting behind the corporate firewall, since Azure IR can't reach private on-prem networks directly."
+B. Intermediate — Control Flow
+
+Q6. Explain ForEach activity — sequential vs parallel execution.
+
+ForEach iterates over a JSON array. isSequential: false (default) runs items in parallel (up to batchCount, max 50); true forces one-at-a-time.
+When to use sequential: when downstream steps have order dependency (e.g., loading dimension tables before fact tables).
+Production example: "I used ForEach with batchCount=10 to parallelize ingestion of 40 tables, but set isSequential=true for a separate pipeline where load order into a data warehouse mattered for foreign key integrity."
+
+Q7. Difference between If Condition and Switch activity?
+
+If Condition = binary branch (true/false) based on an expression.
+Switch = multi-branch, based on matching a value against multiple cases — cleaner than nested If Conditions when you have 3+ branches (e.g., routing by source system type).
+
+Q8. What does Until activity do, and when have you used it?
+
+Loops until a condition becomes true or a timeout is hit — used for polling scenarios.
+Real example: "I used Until to poll a REST API's job-status endpoint every 30 seconds until it returned 'Completed', with a timeout guard to avoid infinite loops if the external system hung."
+
+Q9. What's the difference between Execute Pipeline and calling activities directly?
+
+Execute Pipeline invokes a child pipeline from a parent — enables modular, reusable design (e.g., a generic "load one table" pipeline called by a metadata-driven parent for 50 tables).
+Follow-up: "Does the child pipeline run in the same or different IR context?" — same, unless explicitly reconfigured.
+
+Q10. What is Lookup activity, and what's its row/size limitation?
+
+Retrieves data (a single value, or a small dataset) to be used elsewhere in the pipeline — e.g., getting a config value or a max-watermark value from a control table.
+Limitation: max 5,000 rows / 4MB by default — not meant for bulk retrieval, only control/config data.
+
+Q11. What is Get Metadata activity used for?
+
+Retrieves metadata about a file/folder/table — e.g., file existence, last modified time, child items list, size, schema — commonly used to check if a file has landed before triggering downstream processing.
+
+Q12. Explain Delete activity — risks and safeguards.
+
+Deletes files/folders from a source. Risk: irreversible, so production pipelines should log deleted file names before deletion and often archive rather than hard-delete.
+Best practice to mention: "I never hard-delete without first moving files to an 'archive' folder — this saved us once when a bad batch triggered premature cleanup."
+
+Q13. What is Validation activity?
+
+Pauses pipeline execution until a specified file/folder meets a condition (exists, minimum size) — used as a gate before downstream processing starts, to avoid processing incomplete files.
+C. Parameterization, Variables, Expressions
+
+Q14. Difference between Parameters and Variables in ADF?
+
+Parameters: set once at pipeline invocation, immutable during the run, passed in from outside (or from a parent pipeline).
+Variables: mutable during pipeline execution — set/append inside the pipeline as it runs (e.g., accumulating a list of processed file names).
+
+Q15. What are Global Parameters?
+
+Parameters defined at the factory level (not pipeline level), accessible across all pipelines — commonly used for environment-specific values (e.g., environment name, base storage path) that shouldn't be hardcoded per pipeline, and that change between Dev/Test/Prod via CI/CD.
+
+Q16. Write an expression to get yesterday's date in yyyyMMdd format.
+
+@formatDateTime(addDays(utcnow(), -1), 'yyyyMMdd')
+Follow-up: "How would you parameterize this so backfill can pass any date?" — Add a pipeline parameter runDate, default to @formatDateTime(utcnow(),'yyyy-MM-dd'), and use it instead of utcnow().
+
+Q17. How do you handle dynamic file/folder paths in Copy Activity?
+
+Use dataset parameters for folder/file name, driven by pipeline parameters or expressions — e.g., @concat('raw/', pipeline().parameters.sourceSystem, '/', formatDateTime(utcnow(),'yyyy/MM/dd')) — enables one reusable dataset/pipeline for many sources instead of one per source.
+D. Incremental Load / Watermarking / SCD
+
+Q18. How do you implement incremental load in ADF? Walk through your actual design.
+
+Detailed answer structure:
+Maintain a control/watermark table storing last_loaded_timestamp per source table.
+Lookup activity retrieves the last watermark.
+Copy Activity's source query filters WHERE last_modified > @watermark.
+On success, update the control table with the new max timestamp (via a Stored Procedure or Script activity).
+Production example: "For our billing tables, I used a watermark column last_updated_ts, stored the checkpoint in an Azure SQL control table, and wrapped the update in the same pipeline so a failure mid-load wouldn't advance the watermark incorrectly."
+Common mistake to avoid mentioning as an error you made (if true) or avoid making: updating the watermark before confirming the copy succeeded — this causes silent data loss on failure.
+
+Q19. How would you implement SCD Type 2 in ADF/Databricks?
+
+Compare incoming data against current active records (by business key); if a tracked attribute changed, expire the old record (end_date, is_current = false) and insert a new row with start_date, is_current = true.
+In practice, this logic is usually implemented in a Databricks/PySpark MERGE (Delta Lake) rather than pure ADF Data Flow, since MERGE with conditional insert/update is cleaner in Spark SQL — mention this as your actual approach if true.
+
+Q20. What is CDC (Change Data Capture) and how have you handled it?
+
+CDC captures only changed rows since the last extraction, rather than full reloads. Sources: SQL Server CDC feature, Debezium, or timestamp/watermark-based pseudo-CDC (most common in ADF-based projects without native CDC).
+Honest framing if you haven't used native CDC tools: "I've implemented CDC-style incremental loads using watermark columns rather than native database CDC features — that's been sufficient for our billing pipeline's SLAs."
+E. Triggers
+
+Q21. Types of triggers in ADF?
+
+Schedule trigger — time-based (cron-like).
+Tumbling window trigger — time-sliced, supports backfill and dependency chaining between windows; retains state (unlike Schedule).
+Event-based trigger — fires on blob creation/deletion in a storage account.
+
+Q22. Schedule trigger vs Tumbling Window trigger — when would you pick one over the other?
+
+Schedule: simple recurring runs, no need for backfill or windowed dependency.
+Tumbling Window: needed when pipeline runs represent discrete data windows (e.g., hourly partitions) that must not overlap, need backfill capability, or must wait on a prior window's completion (via dependsOn self-dependency).
+Production example: "We used Tumbling Window for hourly billing file processing because each run represented a specific hour's data partition, and we needed automatic retry-with-backfill if a run failed."
+
+Q23. How do you handle a missed/failed trigger window in Tumbling Window trigger?
+
+ADF retains state per window; failed windows can be rerun individually from Monitor, and maxConcurrency + retry policy control how backfills catch up without overwhelming downstream systems.
+F. Error Handling, Monitoring, Security
+
+Q24. How do you implement error handling in ADF pipelines?
+
+Activity-level: use "On Failure" path (dependency condition) to branch into cleanup/notification logic.
+Try-catch pattern: wrap risky activities, use a subsequent activity with "Failure" dependency to log the error (e.g., to a SQL error-log table) and send an alert (Web Activity to Teams/email/Logic App).
+Real example: "Every pipeline has a final 'On Failure' branch that writes the error message and pipeline run ID to a monitoring table and triggers a Logic App that posts to our team's Teams channel."
+
+Q25. How do you monitor ADF pipelines in production?
+
+Azure Monitor + Log Analytics for centralized logging, Azure Monitor Alerts for threshold-based notification (e.g., pipeline failure, duration exceeding SLA), and the native ADF Monitor UI for ad-hoc debugging.
+
+Q26. How do you secure credentials in ADF?
+
+Never hardcode; use Azure Key Vault-backed Linked Services, or Managed Identity where the target service (e.g., ADLS, Azure SQL) supports AAD authentication directly — removes the need for secrets entirely.
+
+Q27. What is Managed Identity, and why is it preferred over Key Vault secrets in some cases?
+
+Managed Identity gives the ADF instance its own AAD identity that can be granted RBAC roles directly on target resources — no secret to rotate/leak. Key Vault is still needed when the target system requires a traditional connection string/password (e.g., some on-prem or third-party APIs).
+G. Performance & Cost
+
+Q28. How do you optimize Copy Activity performance?
+
+Increase DIU (Data Integration Units) for large transfers, enable parallel copy (parallelCopies), stage large loads through PolyBase/COPY command for SQL sinks instead of row-by-row insert, and partition source queries for very large tables.
+
+Q29. How do you control/optimize ADF cost?
+
+Minimize Data Flow usage (most expensive — spins up Spark clusters) in favor of Copy Activity where transformation is simple; use Time To Live (TTL) on Data Flow clusters to reduce cold-start cost on frequent runs; consolidate small file ingestion to avoid excessive activity-run charges; right-size DIUs instead of maxing them by default.
+
+Q30. What causes a "small files" problem in ADF-orchestrated pipelines, and how do you fix it?
+
+Frequent small batch writes (e.g., streaming-like micro-batches landing many tiny files in ADLS) cause downstream Spark/Databricks jobs to spend more time on file-open overhead than actual processing.
+Fix: batch/consolidate writes (larger batch windows), or run periodic OPTIMIZE/compaction jobs (Delta Lake) downstream.
+H. CI/CD, Git Integration
+
+Q31. How does Git integration work in ADF, and what's your branching strategy?
+
+ADF Studio connects to a Git repo (Azure DevOps/GitHub); each pipeline/dataset/etc. is stored as JSON. Development happens on feature branches, PRs merge into a collaboration branch (commonly main or develop), and a separate adf_publish branch holds auto-generated ARM templates used for deployment.
+Common mistake: confusing the collaboration branch (source JSON) with the publish branch (deployable ARM templates) — they serve different purposes.
+
+Q32. How do you deploy ADF across Dev/Test/Prod environments?
+
+ARM template deployment via Azure DevOps Release Pipelines, parameterizing environment-specific values (Linked Service connection strings, Key Vault names) using ARM template parameters or Global Parameters, so the same pipeline logic runs across environments without code duplication.
+I. Scenario / Production Debugging (high-frequency in real interviews)
+
+Q33. Scenario: Your pipeline was working fine for months, and suddenly starts failing at the Copy Activity step every night. How do you debug?
+
+Structured answer:
+Check ADF Monitor → error message on the failed activity run first (often self-explanatory: throttling, auth expiry, schema drift).
+Check if the source changed — schema change, credential rotation, network/firewall rule change.
+Check IR health if using Self-Hosted IR — node might be down or disconected.
+Check for sink-side issues — storage quota, permission changes.
+Once root cause is found, fix and consider whether a monitoring/alert gap allowed it to go undetected (fixing the immediate issue and improving detection).
+
+Q34. Scenario: A pipeline takes 3x longer than usual today. What do you check?
+
+Data volume spike (source row count vs typical), DIU/parallel copy settings unchanged, source-side performance (locking, query plan changes if pushed-down query), concurrent pipeline contention (has something else in the same IR queue changed), and if using Self-Hosted IR — node resource saturation (CPU/memory on the VM).
+
+Q35. Scenario: You need to backfill 6 months of historical data through a pipeline designed for daily incremental loads. How do you approach it?
+
+Parameterize the date range instead of hardcoding "yesterday," then either use Tumbling Window trigger's backfill capability (set start date in the past, let it auto-generate windows) or build a wrapper pipeline with a ForEach over a date array calling the existing daily-load pipeline as a child (Execute Pipeline) — reusing existing logic without duplicating it.
+
+Q36. Scenario: Interviewer asks — "Walk me through your most complex ADF pipeline."
+
+Use STAR: Situation (what business need) → Task (what you had to build) → Action (specific design decisions: metadata-driven framework, parameterization, error handling) → Result (numbers: tables/day, time saved, cost reduced).
+Real framing based on your background: "I built a metadata-driven ADF pipeline that dynamically ingested 40+ source tables into ADLS Gen2 using a control table listing source/sink mappings and watermark columns, driven by a ForEach with parallel batching, feeding into Databricks for transformation — this reduced manual pipeline maintenance since adding a new table only required a control-table entry, not new pipeline code."
+What's next
+
+This is Part 1 (Strategy + ADF, ~36 core questions covering the highest-yield ADF topics). Given the full scope you outlined, here's how I'd suggest we continue — say the word and I'll build the next file:
+
+Part 2: Databricks (clusters, Spark architecture, Delta Lake, Unity Catalog, performance)
+Part 3: PySpark (transformations, joins, optimization, production issues)
+Part 4: SQL + Python
+Part 5: Real production scenarios + STAR-method project questions
+Part 6: Manager round + HR round + golden answers for "tell me about yourself" / "explain your project"
+
+1. How do you connect Oracle to ADF?
+
+"Sure. First, I identify where the Oracle database is hosted and whether it is accessible from Azure. If Oracle is on-premises or behind a private network, I use a Self-hosted Integration Runtime.
+
+I install and register the Self-hosted Integration Runtime on a server that has network connectivity to Oracle.
+
+Then in Azure Data Factory, I create an Oracle Linked Service and configure the Oracle server, port, service name or SID, authentication details and the appropriate Integration Runtime. I test the connection.
+
+Once the connection is successful, I create an Oracle Dataset and select the required source table or query.
+
+Next, I create a Linked Service and Dataset for the destination, such as ADLS Gen2.
+
+Then I create an ADF pipeline and add a Copy Activity. In the Source section, I select the Oracle Dataset, and in the Sink section, I select the ADLS Dataset. I configure column mappings and the destination folder.
+
+I debug the pipeline and monitor the Copy Activity. I check rows read, rows written, data volume and execution status.
+
+After the pipeline succeeds, I perform source-to-target validation using record counts and data-quality checks such as duplicates and null values.
+
+Once validated, I configure the required trigger or schedule for production execution.
+
+For incremental loads, instead of extracting the entire Oracle table every time, I use a watermark or last-modified column and extract only new or changed records."
+
+That is a very strong answer for your interview.
